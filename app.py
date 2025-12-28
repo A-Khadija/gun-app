@@ -25,28 +25,30 @@ else:
 conf_threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, 0.25, 0.05)
 iou_threshold = st.sidebar.slider("IoU Threshold", 0.0, 1.0, 0.45, 0.05)
 
-# --- Processing Class ---
-# --- Processing Class ---
+# --- Processing Class (Fail-Safe Version) ---
 class YoloProcessor(VideoProcessorBase):
     def __init__(self):
         self.api_key = None
         self.conf = 0.25
         self.iou = 0.45
-        # Add variables to track frames
         self.frame_count = 0
-        self.last_results = None  # Store the last known boxes
+        self.last_results = None
 
     def recv(self, frame):
-        # 1. Convert WebRTC frame to OpenCV format
-        img = frame.to_ndarray(format="bgr24")
-        self.frame_count += 1
+        # 1. ALWAYS get the image first
+        try:
+            img = frame.to_ndarray(format="bgr24")
+        except Exception:
+            # If we can't get the image, return nothing (prevents crash)
+            return None
 
-        # Skip inference if no API key is provided
+        # 2. Check API Key
         if not self.api_key:
+            # If no key, just return the plain video immediately!
             return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        # 2. OPTIMIZATION: Only call API once every 30 frames (approx every 1 second)
-        # We assume 30 FPS. This prevents the "Connection Timeout" error.
+        # 3. API Logic (Only every 30 frames)
+        self.frame_count += 1
         if self.frame_count % 30 == 0:
             try:
                 # Prepare image
@@ -63,23 +65,29 @@ class YoloProcessor(VideoProcessorBase):
                 }
                 files = {"file": ("frame.jpg", image_bytes, "image/jpeg")}
                 
-                # Send to API
-                response = requests.post(API_URL, headers=headers, data=data, files=files)
+                # Send to API with a short timeout so it doesn't freeze
+                response = requests.post(API_URL, headers=headers, data=data, files=files, timeout=2.0)
                 if response.status_code == 200:
                     self.last_results = response.json()
             except Exception as e:
-                print(f"API Error: {e}")
+                print(f"API Error: {e}") 
+                # Do NOT stop the video just because the API failed.
+                # We just ignore the error and keep showing the video.
 
-        # 3. Always draw the *last known* results on the current frame
-        # This keeps the video smooth even while waiting for the next API update
+        # 4. Draw Boxes (Safely)
         if self.last_results:
-            img = self.draw_bbox(img, self.last_results)
+            try:
+                img = self.draw_bbox(img, self.last_results)
+            except Exception:
+                # If drawing fails, ignore it and show the plain image
+                pass
 
-        # 4. Return the processed frame
+        # 5. RETURN THE IMAGE
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
     def draw_bbox(self, frame, results):
-        """Helper to draw boxes on the frame"""
+        # ... (Keep your existing draw_bbox code here) ...
+        # (It is already wrapped in try-except, so it is safe)
         try:
             data = results[0] if isinstance(results, list) else results
             detections = []
