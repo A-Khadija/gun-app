@@ -26,48 +26,56 @@ conf_threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, 0.25, 0.05)
 iou_threshold = st.sidebar.slider("IoU Threshold", 0.0, 1.0, 0.45, 0.05)
 
 # --- Processing Class ---
+# --- Processing Class ---
 class YoloProcessor(VideoProcessorBase):
     def __init__(self):
-        # We need these variables inside the class
         self.api_key = None
         self.conf = 0.25
         self.iou = 0.45
+        # Add variables to track frames
+        self.frame_count = 0
+        self.last_results = None  # Store the last known boxes
 
     def recv(self, frame):
         # 1. Convert WebRTC frame to OpenCV format
         img = frame.to_ndarray(format="bgr24")
+        self.frame_count += 1
 
         # Skip inference if no API key is provided
         if not self.api_key:
             return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        # 2. Prepare image for API
-        # Convert to RGB
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        # Encode to JPEG bytes
-        _, img_encoded = cv2.imencode('.jpg', img)
-        image_bytes = img_encoded.tobytes()
+        # 2. OPTIMIZATION: Only call API once every 30 frames (approx every 1 second)
+        # We assume 30 FPS. This prevents the "Connection Timeout" error.
+        if self.frame_count % 30 == 0:
+            try:
+                # Prepare image
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                _, img_encoded = cv2.imencode('.jpg', img)
+                image_bytes = img_encoded.tobytes()
 
-        # 3. Call API (Synchronous - might slow down video!)
-        try:
-            headers = {"x-api-key": self.api_key}
-            data = {
-                "model": MODEL_URL,
-                "imgsz": 640,
-                "conf": self.conf,
-                "iou": self.iou
-            }
-            files = {"file": ("frame.jpg", image_bytes, "image/jpeg")}
-            
-            response = requests.post(API_URL, headers=headers, data=data, files=files)
-            if response.status_code == 200:
-                results = response.json()
-                # Draw boxes
-                img = self.draw_bbox(img, results)
-        except Exception as e:
-            print(f"API Error: {e}")
+                headers = {"x-api-key": self.api_key}
+                data = {
+                    "model": MODEL_URL,
+                    "imgsz": 640,
+                    "conf": self.conf,
+                    "iou": self.iou
+                }
+                files = {"file": ("frame.jpg", image_bytes, "image/jpeg")}
+                
+                # Send to API
+                response = requests.post(API_URL, headers=headers, data=data, files=files)
+                if response.status_code == 200:
+                    self.last_results = response.json()
+            except Exception as e:
+                print(f"API Error: {e}")
 
-        # 4. Return the processed frame to the browser
+        # 3. Always draw the *last known* results on the current frame
+        # This keeps the video smooth even while waiting for the next API update
+        if self.last_results:
+            img = self.draw_bbox(img, self.last_results)
+
+        # 4. Return the processed frame
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
     def draw_bbox(self, frame, results):
@@ -95,18 +103,21 @@ class YoloProcessor(VideoProcessorBase):
         except Exception:
             pass
         return frame
-
 # --- Main Layout ---
 
 if not api_key:
     st.warning("Please enter your API Key in the sidebar to start.")
 else:
-    # We create the streamer
+   # We create the streamer with better network settings
     ctx = webrtc_streamer(
         key="yolo-stream",
         video_processor_factory=YoloProcessor,
         rtc_configuration={
-            "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:global.stun.twilio.com:3478"]},
+                {"urls": ["stun:stun.framasoft.org:3478"]},
+            ]
         }
     )
 
