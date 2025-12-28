@@ -117,7 +117,20 @@ else:
     status_text = st.empty()
 
     if run_camera:
-        cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+        for index in range(3):
+            print(f"Testing Camera Index {index}...")
+            cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+            
+            if cap.isOpened():
+                print(f"--> SUCCESS! Camera found at Index {index}")
+                ret, frame = cap.read()
+                if ret:
+                    print("    Frame captured successfully.")
+                else:
+                    print("    Camera opened, but failed to grab a frame.")
+                cap.release()
+            else:
+                print("    Failed to open.")
         
         while run_camera:
             ret, frame = cap.read()
