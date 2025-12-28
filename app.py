@@ -2,9 +2,8 @@ import streamlit as st
 import cv2
 import requests
 import numpy as np
-from PIL import Image
-import io
 import json
+import time
 
 # --- Configuration ---
 # API Configuration
@@ -18,7 +17,13 @@ st.markdown("This app sends webcam frames to the Ultralytics API for inference."
 
 # --- Sidebar ---
 st.sidebar.header("Settings")
-api_key = st.sidebar.text_input("Enter your Ultralytics API Key", type="password")
+
+# Check if the key is in secrets (local file), otherwise ask in sidebar
+if "ultralytics_api_key" in st.secrets:
+    api_key = st.secrets["ultralytics_api_key"]
+else:
+    api_key = st.sidebar.text_input("Enter your Ultralytics API Key", type="password")
+
 conf_threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, 0.25, 0.05)
 iou_threshold = st.sidebar.slider("IoU Threshold", 0.0, 1.0, 0.45, 0.05)
 
@@ -42,6 +47,7 @@ def run_inference(image_bytes, api_key, conf, iou):
         response.raise_for_status()
         return response.json()
     except Exception as e:
+        # Only show error if it's not a common "stop" signal
         st.error(f"API Error: {e}")
         return None
 
@@ -50,30 +56,22 @@ def draw_bbox(frame, results):
     if not results:
         return frame
         
-    # The Ultralytics API usually returns a list of results.
-    # We assume the first item corresponds to our single image.
     try:
+        # The Ultralytics API usually returns a list of results.
         data = results[0] if isinstance(results, list) else results
         
-        # Depending on API version, boxes might be in 'boxes' or top-level. 
-        # We look for 'boxes' containing 'data' or standard list formats.
         detections = []
         
+        # Parse 'boxes' structure
         if 'boxes' in data:
-            # Common structure: {'boxes': [{'cls': ..., 'conf': ..., 'box': {'x1':...}}]}
-            # Or array based structure. We'll attempt to iterate assuming object structure.
             raw_boxes = data['boxes']
-            # If it's the 'data' key inside boxes (newer standard)
             if isinstance(raw_boxes, dict) and 'data' in raw_boxes:
                 detections = raw_boxes['data']
             elif isinstance(raw_boxes, list):
                 detections = raw_boxes
         
         for det in detections:
-            # Extract coordinates. Structure can vary, handling generic JSON response
-            # Expected: x1, y1, x2, y2, class, confidence
-            
-            # Case A: Object with 'box' dictionary
+            # Extract coordinates
             if 'box' in det:
                 x1 = int(det['box']['x1'])
                 y1 = int(det['box']['y1'])
@@ -81,10 +79,7 @@ def draw_bbox(frame, results):
                 y2 = int(det['box']['y2'])
                 label = det.get('name', str(det.get('cls', 'Object')))
                 conf = det.get('conf', 0)
-            
-            # Case B: Flat list/dictionary (less common in Hub API but possible)
             else:
-                # Fallback or specific parsing logic based on your exact JSON structure
                 continue
 
             # Draw Rectangle
@@ -97,11 +92,23 @@ def draw_bbox(frame, results):
             cv2.putText(frame, text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
     except Exception as e:
-        # If parsing fails, print structure to console for debugging
         print(f"Parsing Error: {e}")
-        print(f"JSON Structure: {json.dumps(results, indent=2)}")
         
     return frame
+
+def get_working_camera():
+    """Tries indices 0 to 2 to find a working camera."""
+    for index in range(3):
+        # We try with cv2.CAP_DSHOW which is often needed on Windows
+        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                st.sidebar.success(f"Connected to Camera Index {index}")
+                return cap
+            else:
+                cap.release()
+    return None
 
 # --- Main App Loop ---
 
@@ -117,52 +124,41 @@ else:
     status_text = st.empty()
 
     if run_camera:
-        for index in range(3):
-            print(f"Testing Camera Index {index}...")
-            cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-            
-            if cap.isOpened():
-                print(f"--> SUCCESS! Camera found at Index {index}")
-                ret, frame = cap.read()
-                if ret:
-                    print("    Frame captured successfully.")
-                else:
-                    print("    Camera opened, but failed to grab a frame.")
-                cap.release()
-            else:
-                print("    Failed to open.")
-        
-        while run_camera:
-            ret, frame = cap.read()
-            if not ret:
-                st.write("Failed to capture video")
-                break
-            
-            # 1. Convert Frame to Bytes for API
-            # Convert BGR (OpenCV) to RGB (PIL/Streamlit)
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Encode frame to JPEG bytes
-            _, img_encoded = cv2.imencode('.jpg', frame)
-            image_bytes = img_encoded.tobytes()
-            
-            # 2. Call API
-            status_text.text("Sending to API...")
-            results = run_inference(image_bytes, api_key, conf_threshold, iou_threshold)
-            
-            # 3. Draw Results
-            if results:
-                # Note: We draw on the original BGR frame or RGB frame depending on preference
-                # Let's draw on RGB so colors are correct in Streamlit
-                frame_with_boxes = draw_bbox(frame_rgb.copy(), results)
-                status_text.text("Inference Complete")
-                
-                # 4. Display in Streamlit
-                frame_window.image(frame_with_boxes)
-            else:
-                frame_window.image(frame_rgb)
-            
-            # Optional: Add a small delay if you want to save API credits/bandwidth
-            # time.sleep(0.1) 
+        # 1. Find a working camera
+        cap = get_working_camera()
 
-        cap.release()
+        if cap is None:
+            st.error("Could not find a working camera (checked indexes 0, 1, and 2). Please check if another app is using it.")
+        else:
+            # 2. Run the video loop
+            while run_camera:
+                ret, frame = cap.read()
+                if not ret:
+                    st.write("Failed to capture video")
+                    break
+                
+                # Convert Frame to Bytes for API
+                # Convert BGR (OpenCV) to RGB (PIL/Streamlit)
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # Encode frame to JPEG bytes
+                _, img_encoded = cv2.imencode('.jpg', frame)
+                image_bytes = img_encoded.tobytes()
+                
+                # Call API
+                status_text.text("Sending to API...")
+                results = run_inference(image_bytes, api_key, conf_threshold, iou_threshold)
+                
+                # Draw Results
+                if results:
+                    frame_with_boxes = draw_bbox(frame_rgb.copy(), results)
+                    status_text.text("Inference Complete")
+                    frame_window.image(frame_with_boxes)
+                else:
+                    frame_window.image(frame_rgb)
+                
+                # Optional: Add delay to save API usage if needed
+                # time.sleep(0.1)
+
+            # Release camera when the loop ends (user unchecks box)
+            cap.release()
