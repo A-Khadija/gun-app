@@ -117,7 +117,7 @@ else:
     status_text = st.empty()
 
     if run_camera:
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
         
         while run_camera:
             ret, frame = cap.read()
